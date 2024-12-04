@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebRTC Debugging</title>
+    <style>
+        video {
+            width: 45%;
+            margin: 5px;
+        }
+    </style>
+</head>
+<body>
+    <h1>WebRTC Video Call with Debugging</h1>
+    <div>
+        <button id="startBtn">Start Local Stream</button>
+        <button id="connectBtn">Connect to Server</button>
+        <button id="callBtn">Start Call</button>
+    </div>
+    <video id="localVideo" autoplay muted></video>
+    <video id="remoteVideo" autoplay></video>
+    <div id="remoteStreams"></div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.min.js"></script>
+    <script>
+        const SIGNALING_SERVER_URL = '/';
+        const socket = io(SIGNALING_SERVER_URL, { autoConnect: false });
+
+        const localVideo = document.getElementById('localVideo');
+        const remoteVideo = document.getElementById('remoteVideo');
+        const startBtn = document.getElementById('startBtn');
+        const connectBtn = document.getElementById('connectBtn');
+        const callBtn = document.getElementById('callBtn');
+
+        let localStream;
+        let peerConnection;
+        const configuration = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+        const pendingCandidates = [];
+
+        startBtn.onclick = async () => {
+            try {
+                localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+                localVideo.srcObject = localStream;
+                console.log('Local stream started');
+            } catch (error) {
+                console.error('Error accessing media devices:', error);
+            }
+        };
+
+        connectBtn.onclick = () => {
+            if (!socket.connected) {
+                socket.connect();
+                console.log('Connected to signaling server');
+            } else {
+                console.warn('Already connected to signaling server');
+            }
+        };
+
+        callBtn.onclick = () => {
+            if (!localStream) {
+                console.warn('Start local stream before making a call');
+                return;
+            }
+            if (!peerConnection) {
+                createPeerConnection();
+            }
+            sendOffer();
+        };
+
+        socket.on('data', (data) => {
+            console.log('Received data:', data);
+            handleSignalingData(data);
+        });
+
+        function createPeerConnection() {
+            peerConnection = new RTCPeerConnection(configuration);
+
+            peerConnection.onicecandidate = (event) => {
+                if (event.candidate) {
+                    console.log('ICE candidate:', event.candidate);
+                    sendData({ type: 'candidate', candidate: event.candidate });
+                }
+            };
+
+            peerConnection.ontrack = (event) => {
+                console.log('Track received:', event.streams[0]);
+                console.log('Stream type:', event.streams[0] instanceof MediaStream);
+                console.log('Stream contains tracks:', event.streams[0].getTracks());
+                
+                if (event.track.kind === 'video') {
+                    if (remoteVideo.srcObject !== event.streams[0]) {
+                        remoteVideo.srcObject = event.streams[0];
+                        console.log('Remote video stream set to remote video');
+                    }
+                }
+            };
+
+            localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
+            
+            console.log('Peer connection created');
+            console.log("PEER Connection State:", peerConnection.iceConnectionState);
+            console.log("PEER Signaling State:", peerConnection.signalingState);
+            console.log("PEER Connection State:", peerConnection.connectionState);
+            console.log('Peer connection created');
+            processPendingCandidates();
+        }
+
+        function sendOffer() {
+            peerConnection.createOffer()
+                .then(offer => {
+                    peerConnection.setLocalDescription(offer);
+                    console.log('Sending offer:', offer);
+                    sendData({ type: 'offer', sdp: offer });
+                })
+                .catch(error => console.error('Error creating offer:', error));
+        }
+
+        function handleSignalingData(data) {
+            switch (data.type) {
+                case 'offer':
+                    if (!peerConnection) {
+                        createPeerConnection();
+                    }
+                    peerConnection.setRemoteDescription(new RTCSessionDescription(data.sdp))
+                        .then(() => {
+                            return peerConnection.createAnswer();
+                        })
+                        .then(answer => {
+                            peerConnection.setLocalDescription(answer);
+                            console.log('Sending answer:', answer);
+                            sendData({ type: 'answer', sdp: answer });
+                        })
+                        .catch(error => console.error('Error handling offer:', error));
+                    break;
+                case 'answer':
+                    peerConnection.setRemoteDescription(new RTCSessionDescription(data.sdp))
+                        .catch(error => console.error('Error handling answer:', error));
+                    break;
+                case 'candidate':
+                    if (peerConnection) {
+                        peerConnection.addIceCandidate(new RTCIceCandidate(data.candidate))
+                            .catch(error => console.error('Error adding ICE candidate:', error));
+                    } else {
+                        console.warn('Peer connection not ready for ICE candidate, storing it');
+                        pendingCandidates.push(data.candidate);
+                    }
+                    break;
+                default:
+                    console.warn('Unknown signaling data type:', data.type);
+            }
+        }
+
+        function sendData(data) {
+            if (socket.connected) {
+                socket.emit('data', data);
+                console.log('Sent data:', data);
+            } else {
+                console.warn('Socket not connected. Cannot send data:', data);
+            }
+        }
+
+        function processPendingCandidates() {
+            while (pendingCandidates.length > 0) {
+                const candidate = pendingCandidates.shift();
+                peerConnection.addIceCandidate(new RTCIceCandidate(candidate))
+                    .catch(error => console.error('Error processing pending ICE candidate:', error));
+            }
+        }
+    </script>
+</body>
+</html>
